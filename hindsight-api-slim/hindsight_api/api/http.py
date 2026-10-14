@@ -2180,7 +2180,7 @@ BANK_TEMPLATE_CURRENT_VERSION = "1"
 class BankTemplateMentalModel(BaseModel):
     """A mental model definition within a bank template manifest."""
 
-    id: str = Field(description="Unique ID for the mental model (alphanumeric lowercase with hyphens)")
+    id: str = Field(description="Unique ID for the mental model (alphanumeric lowercase with hyphens and underscores)")
     name: str = Field(description="Human-readable name for the mental model")
     source_query: str = Field(description="The query to run to generate content")
     tags: list[str] = FieldWithDefault(list, description="Tags for scoped visibility")
@@ -2190,9 +2190,9 @@ class BankTemplateMentalModel(BaseModel):
     @field_validator("id")
     @classmethod
     def validate_id(cls, v: str) -> str:
-        if not re.match(r"^[a-z0-9][a-z0-9-]*$", v):
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", v):
             raise ValueError(
-                f"Mental model id '{v}' must be alphanumeric lowercase with hyphens, starting with a letter or digit."
+                f"Mental model id '{v}' must be alphanumeric lowercase with hyphens and underscores, starting with a letter or digit."
             )
         return v
 
