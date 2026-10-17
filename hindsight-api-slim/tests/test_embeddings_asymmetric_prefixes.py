@@ -29,6 +29,7 @@ TEXT_IN_PROVIDERS = [
     ("requesty", {"HINDSIGHT_API_EMBEDDINGS_REQUESTY_API_KEY": "sk-req-test"}, "OpenAIEmbeddings"),
     ("litellm", {}, "LiteLLMEmbeddings"),
     ("litellm-sdk", {}, "LiteLLMSDKEmbeddings"),
+    ("google", {"HINDSIGHT_API_EMBEDDINGS_GEMINI_API_KEY": "test-key"}, "GeminiEmbeddings"),
 ]
 
 
@@ -46,6 +47,7 @@ def setup_test_env():
         "HINDSIGHT_API_EMBEDDINGS_OPENROUTER_API_KEY",
         "HINDSIGHT_API_EMBEDDINGS_REQUESTY_API_KEY",
         "HINDSIGHT_API_EMBEDDINGS_ZEROENTROPY_API_KEY",
+        "HINDSIGHT_API_EMBEDDINGS_GEMINI_API_KEY",
         "HINDSIGHT_API_LLM_API_KEY",
         "HINDSIGHT_API_LLM_PROVIDER",
     ]

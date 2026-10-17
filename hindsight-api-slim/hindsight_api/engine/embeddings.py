@@ -2069,8 +2069,13 @@ class GeminiEmbeddings(Embeddings):
         batch_size: int = 100,
         force_ipv4: bool = False,
         retry_policy: RetryPolicy | None = None,
+        query_prefix: str = "",
+        passage_prefix: str = "",
     ):
         self.model = model
+        # Gemini Embedding 2 用输入文字区分查询和资料；默认留空以兼容已有向量。
+        self.query_prefix = query_prefix
+        self.passage_prefix = passage_prefix
         self.api_key = api_key
         self.vertexai_project_id = vertexai_project_id
         self.vertexai_region = vertexai_region or "us-central1"
@@ -2568,6 +2573,8 @@ def create_embeddings_from_env() -> Embeddings:
                 batch_size=config.embeddings_gemini_batch_size,
                 force_ipv4=config.embeddings_gemini_force_ipv4,
                 retry_policy=_retry_policy_from_config(config),
+                query_prefix=query_prefix,
+                passage_prefix=passage_prefix,
             ),
             config,
         )
