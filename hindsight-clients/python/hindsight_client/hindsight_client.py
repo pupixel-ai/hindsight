@@ -283,6 +283,7 @@ class Hindsight:
         tags: list[str] | None = None,
         update_mode: str | None = None,
         retain_async: bool = False,
+        resolve_entities: bool = True,
     ) -> RetainResponse:
         """
         Store a single memory (sync wrapper — prefer :meth:`aretain` in async code).
@@ -295,6 +296,7 @@ class Hindsight:
             document_id: Optional document ID for grouping
             metadata: Optional user-defined metadata
             entities: Optional list of entities [{"text": "...", "type": "..."}]
+            resolve_entities: False keeps caller-supplied names literal (default True).
             tags: Optional list of tags for filtering memories during recall/reflect
             update_mode: How to handle existing documents ('replace' or 'append')
             retain_async: If True, process asynchronously in background (default: False)
@@ -308,6 +310,7 @@ class Hindsight:
             "context": context,
             "metadata": metadata,
             "entities": entities,
+            "resolve_entities": resolve_entities,
             "tags": tags,
         }
         if update_mode is not None:
@@ -814,6 +817,7 @@ class Hindsight:
                     # Use item's document_id if provided, otherwise fall back to batch-level document_id
                     document_id=item.get("document_id") or document_id,
                     entities=entities,
+                    resolve_entities=item.get("resolve_entities", True),
                     tags=item.get("tags"),
                     observation_scopes=obs_scopes,
                     strategy=item.get("strategy"),
@@ -841,6 +845,7 @@ class Hindsight:
         tags: list[str] | None = None,
         update_mode: str | None = None,
         retain_async: bool = False,
+        resolve_entities: bool = True,
     ) -> RetainResponse:
         """
         Store a single memory (async — preferred over :meth:`retain`).
@@ -853,6 +858,7 @@ class Hindsight:
             document_id: Optional document ID for grouping
             metadata: Optional user-defined metadata
             entities: Optional list of entities [{"text": "...", "type": "..."}]
+            resolve_entities: False keeps caller-supplied names literal (default True).
             tags: Optional list of tags for filtering memories during recall/reflect
             update_mode: How to handle existing documents ('replace' or 'append')
             retain_async: If True, process asynchronously in background (default: False)
@@ -866,6 +872,7 @@ class Hindsight:
             "context": context,
             "metadata": metadata,
             "entities": entities,
+            "resolve_entities": resolve_entities,
             "tags": tags,
         }
         if update_mode is not None:

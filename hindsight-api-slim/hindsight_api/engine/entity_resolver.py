@@ -291,6 +291,18 @@ class EntityResolver:
         taxonomy_lookup: set[str] | None = None,
         labels_cfg=None,
     ) -> list[ResolvedEntity]:
+        # 调用方已经确定身份时，只按名称查找或创建，跳过相似度与共现评分。
+        if entities_data and not any(e.get("resolve", True) for e in entities_data):
+            return await self._resolve_from_candidates(
+                conn,
+                bank_id,
+                entities_data,
+                unit_event_date,
+                all_candidates={},
+                cooccurrence_map={},
+                taxonomy_lookup=taxonomy_lookup,
+                labels_cfg=labels_cfg,
+            )
         if self.entity_lookup == "trigram":
             # Route to backend-specific fuzzy strategy.
             # Non-PG backends (Oracle) use UTL_MATCH instead of pg_trgm.
@@ -653,7 +665,8 @@ class EntityResolver:
                 labels_cfg and taxonomy_lookup and _is_label_entity(entity_text, labels_cfg, taxonomy_lookup)
             )
 
-            if not candidates:
+            # 混合批次也逐项遵守调用方的精确匹配要求。
+            if not entity_data.get("resolve", True) or not candidates:
                 # Will create new entity
                 entities_to_create.append(_EntityToCreate(idx=idx, name=entity_text, event_date=entity_event_date))
                 continue
