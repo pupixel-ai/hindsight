@@ -252,9 +252,15 @@ def _prepare_entities_for_resolution(
         formatted_entities = []
         for ent in entity_list:
             if hasattr(ent, "text"):
-                formatted_entities.append({"text": ent.text, "type": "CONCEPT"})
+                formatted_entities.append({"text": ent.text, "type": "CONCEPT", "resolve": True})
             elif isinstance(ent, dict):
-                formatted_entities.append({"text": ent.get("text", ""), "type": ent.get("type", "CONCEPT")})
+                formatted_entities.append(
+                    {
+                        "text": ent.get("text", ""),
+                        "type": ent.get("type", "CONCEPT"),
+                        "resolve": ent.get("resolve", True),
+                    }
+                )
         all_entities.append(formatted_entities)
 
     total_entities = sum(len(ents) for ents in all_entities)
@@ -276,6 +282,7 @@ def _prepare_entities_for_resolution(
                 {
                     "text": entity["text"],
                     "type": entity["type"],
+                    "resolve": entity["resolve"],
                     "nearby_entities": entities,
                 }
             )

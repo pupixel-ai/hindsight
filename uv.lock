@@ -1670,7 +1670,7 @@ requires-dist = [{ name = "hindsight-api-slim", extras = ["all"], editable = "hi
 
 [[package]]
 name = "hindsight-api-slim"
-version = "0.8.5+pupi.1"
+version = "0.8.5+pupi.2"
 source = { editable = "hindsight-api-slim" }
 dependencies = [
     { name = "aiohttp" },

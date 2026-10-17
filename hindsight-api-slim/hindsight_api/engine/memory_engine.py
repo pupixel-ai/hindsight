@@ -6662,6 +6662,7 @@ class MemoryEngine(MemoryEngineInterface):
         occurred_end: str | None = None,
         new_fact_type: str | None = None,
         entities: list[str] | None = None,
+        resolve_entities: bool = True,
         state: str | None = None,
         reason: str | None = None,
         request_context: "RequestContext",
@@ -6830,7 +6831,7 @@ class MemoryEngine(MemoryEngineInterface):
                             [new_text],
                             new_context or "",
                             [entity_date],
-                            [[{"text": name, "type": "CONCEPT"} for name in new_entities]],
+                            [[{"text": name, "type": "CONCEPT", "resolve": resolve_entities} for name in new_entities]],
                             entity_labels=entity_labels,
                         )
                         await conn.execute(f"DELETE FROM {ue} WHERE unit_id = $1", str(memory_uuid))

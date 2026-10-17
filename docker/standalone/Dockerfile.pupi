@@ -4,8 +4,8 @@ FROM ghcr.io/vectorize-io/hindsight-api:0.8.5@sha256:35d88f6fc2d63ba37e8118dc029
 USER root
 COPY --chown=hindsight:hindsight hindsight-api-slim /app/api
 RUN uv pip install --python /app/api/.venv/bin/python --no-deps --reinstall /app/api \
-    && /app/api/.venv/bin/python -c "from importlib.metadata import version; assert version('hindsight-api-slim') == '0.8.5+pupi.1'"
+    && /app/api/.venv/bin/python -c "from importlib.metadata import version; assert version('hindsight-api-slim') == '0.8.5+pupi.2'"
 ARG SOURCE_REVISION
-LABEL org.opencontainers.image.version="0.8.5-pupi.1" \
+LABEL org.opencontainers.image.version="0.8.5-pupi.2" \
       org.opencontainers.image.revision="${SOURCE_REVISION}"
 USER hindsight

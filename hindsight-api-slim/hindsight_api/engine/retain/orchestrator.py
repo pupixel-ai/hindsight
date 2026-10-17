@@ -258,6 +258,7 @@ from .types import (
     ResolvedEntity,
     RetainContent,
     RetainContentDict,
+    UserEntities,
 )
 
 logger = logging.getLogger(__name__)
@@ -350,7 +351,11 @@ async def _pre_resolve_phase1(
     set_stage("retain.phase1.resolve")
     from .link_utils import compute_semantic_links_ann
 
-    user_entities_per_content = {idx: content.entities for idx, content in enumerate(contents) if content.entities}
+    user_entities_per_content = {
+        idx: UserEntities(entities=content.entities, resolve=content.resolve_entities)
+        for idx, content in enumerate(contents)
+        if content.entities
+    }
 
     # Use placeholder unit_ids for grouping during resolution.  The actual
     # unit_ids are created later by insert_facts_batch inside the transaction,
@@ -1351,6 +1356,7 @@ async def _streaming_retain_batch(
                 event_date=source.event_date,
                 metadata=source.metadata,
                 entities=source.entities,
+                resolve_entities=source.resolve_entities,
                 tags=source.tags,
                 observation_scopes=source.observation_scopes,
             )
@@ -2458,6 +2464,7 @@ def _build_contents(contents_dicts: list[RetainContentDict], document_tags: list
             event_date=event_date_value,
             metadata=item.get("metadata", {}),
             entities=item.get("entities", []),
+            resolve_entities=item.get("resolve_entities", True),
             tags=merged_tags,
             observation_scopes=item.get("observation_scopes"),
         )
@@ -2519,6 +2526,7 @@ def _build_delta_contents(
             event_date=template_content.event_date,
             metadata=template_content.metadata,
             entities=template_content.entities,
+            resolve_entities=template_content.resolve_entities,
             tags=template_content.tags,
             observation_scopes=template_content.observation_scopes,
         )
