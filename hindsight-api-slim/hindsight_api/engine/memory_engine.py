@@ -56,7 +56,13 @@ from ..config import (
     get_config,
 )
 from ..metrics import get_metrics_collector
-from ..tracing import create_operation_span, extract_task_trace_context, inject_task_trace_context
+from ..tracing import (
+    create_operation_span,
+    extract_task_trace_context,
+    inject_task_trace_context,
+    set_span_io,
+    summarize_recall_for_span,
+)
 from ..utils import mask_network_location
 from ..worker.exceptions import DeferOperation, RetryTaskAt, format_task_error
 from ..worker.stage import set_stage
@@ -9168,6 +9174,10 @@ class MemoryEngine(MemoryEngineInterface):
         recall_span.set_attribute("hindsight.fact_types", ",".join(fact_type))
         recall_span.set_attribute("hindsight.thinking_budget", thinking_budget)
         recall_span.set_attribute("hindsight.max_tokens", max_tokens)
+        set_span_io(
+            recall_span,
+            input={"query": query, "fact_types": list(fact_type), "budget": str(budget), "max_tokens": max_tokens},
+        )
 
         try:
             # Backpressure: limit concurrent recalls to prevent overwhelming the database
@@ -9352,6 +9362,8 @@ class MemoryEngine(MemoryEngineInterface):
                 except Exception as e:
                     logger.warning(f"Post-recall hook error (non-fatal): {e}")
 
+            if result is not None:
+                set_span_io(recall_span, output=summarize_recall_for_span(result))
             return result
         finally:
             recall_span_context.__exit__(None, None, None)
@@ -18482,7 +18494,16 @@ class MemoryEngine(MemoryEngineInterface):
         )
 
         # Create parent span for mental model refresh operation
-        with create_operation_span("mental_model_refresh", bank_id):
+        with create_operation_span("mental_model_refresh", bank_id) as refresh_span:
+            set_span_io(
+                refresh_span,
+                input={
+                    "mental_model_id": mental_model_id,
+                    "name": mental_model.get("name"),
+                    "source_query": mental_model.get("source_query"),
+                    "mode": mode,
+                },
+            )
             try:
                 run = await self._execute_mental_model_refresh(
                     bank_id, mental_model, mode=mode, request_context=request_context
@@ -18514,6 +18535,10 @@ class MemoryEngine(MemoryEngineInterface):
                 ) from exc
             if run is None:
                 return None
+            set_span_io(
+                refresh_span,
+                output={"outcome": run.outcome, "effective_mode": run.effective_mode, "content": run.final_content},
+            )
 
             reflect_response_payload = run.reflect_response
             # What this run did with the document. Recorded unconditionally (the

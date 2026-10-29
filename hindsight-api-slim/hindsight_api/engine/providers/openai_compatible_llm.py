@@ -26,13 +26,15 @@ import logging
 import re
 import time
 from contextlib import AbstractAsyncContextManager, nullcontext
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from typing import Any, Callable, Literal
 from urllib.parse import parse_qs, urlparse, urlunparse
 
 import aiohttp
-from openai import APIConnectionError, APIStatusError, AsyncOpenAI, LengthFinishReasonError
+import httpx  # noqa: TID251 - only types the OpenAI SDK response hook
+from openai import APIConnectionError, APIStatusError, AsyncOpenAI, DefaultAsyncHttpxClient, LengthFinishReasonError
 
 from hindsight_api.config import get_config
 from hindsight_api.engine.aiohttp_session import LoopLocalSession, UpstreamHTTPError, raise_for_status
@@ -417,6 +419,31 @@ def _content_or_error(response: Any, *, provider: str, model: str, scope: str) -
             retryable=retryable,
         )
     return content, choice
+
+
+# Cloudflare AI Gateway dynamic routes name the model that actually served the call in
+# this header; the configured model is only the route alias, which matches no price.
+_ROUTED_MODEL_HEADER = "cf-aig-model"
+# Per-call slot the response hook fills. A mutable dict (not a value set by the hook)
+# so the write is visible to the caller even if the request ran in a copied context.
+_routed_model_slot: ContextVar[dict[str, str] | None] = ContextVar("_routed_model_slot", default=None)
+
+
+async def _capture_routed_model(response: httpx.Response) -> None:
+    slot = _routed_model_slot.get()
+    if slot is not None and (model := response.headers.get(_ROUTED_MODEL_HEADER)):
+        slot["model"] = model
+
+
+def _start_routed_model_capture() -> dict[str, str]:
+    slot: dict[str, str] = {}
+    _routed_model_slot.set(slot)
+    return slot
+
+
+def _served_model(response: Any, slot: dict[str, str]) -> str | None:
+    """The model that served ``response``: gateway header first, then the body's ``model``."""
+    return slot.get("model") or getattr(response, "model", None) or None
 
 
 def _usage_from_openai_response(response: Any) -> LLMResponseUsage:
@@ -960,6 +987,8 @@ class OpenAICompatibleLLM(LLMInterface):
             "api_key": self.api_key,
             "max_retries": 0,
             "default_headers": with_openai_compatible_user_agent(default_headers),
+            # Response headers are otherwise unreachable from the parsed SDK result.
+            "http_client": DefaultAsyncHttpxClient(event_hooks={"response": [_capture_routed_model]}),
         }
         if self.base_url:
             parsed = urlparse(self.base_url)
@@ -1331,6 +1360,7 @@ class OpenAICompatibleLLM(LLMInterface):
             # are visible from logs (small models on strict structured output
             # often loop here). Cheap no-op outside worker context.
             try:
+                routed = _start_routed_model_capture()
                 if response_format is not None:
                     async with attempt_context() if attempt_context is not None else nullcontext():
                         set_stage(f"llm.{self.provider}.{scope}.attempt={attempt + 1}/{max_retries + 1}")
@@ -1484,6 +1514,7 @@ class OpenAICompatibleLLM(LLMInterface):
                     error=None,
                     cached_tokens=cached_tokens,
                     thoughts_tokens=thoughts_tokens,
+                    response_model=_served_model(response, routed),
                 )
 
                 # Log slow calls
@@ -1768,6 +1799,7 @@ class OpenAICompatibleLLM(LLMInterface):
         attempt = -1
         while (attempt := attempt + 1) < attempts_allowed:
             try:
+                routed = _start_routed_model_capture()
                 async with attempt_context() if attempt_context is not None else nullcontext():
                     set_stage(f"llm.{self.provider}.tools.attempt={attempt + 1}/{attempts_allowed}")
                     response = await asyncio.wait_for(
@@ -1839,6 +1871,7 @@ class OpenAICompatibleLLM(LLMInterface):
                     tool_calls=tool_calls_dict,
                     cached_tokens=cached_tokens,
                     thoughts_tokens=thoughts_tokens,
+                    response_model=_served_model(response, routed),
                 )
 
                 return LLMToolCallResult(
