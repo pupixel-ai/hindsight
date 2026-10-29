@@ -23277,30 +23277,12 @@ class MemoryEngine(MemoryEngineInterface):
         trigger: "CoverageTrigger",
         dedupe_excludes_operation_id: str | None = None,
     ) -> dict[str, Any]:
-        """Bring a bank's per-(bank, fact_type) vector indexes back in line with its size.
+        """按数据量修复 bank 索引覆盖，并持久保留冷却期间发现的缺口。
 
-        Only ever does anything when ``HINDSIGHT_API_VECTOR_INDEX_MIN_ROWS`` is
-        set. At its default of 0 the threshold is off, indexes are created with
-        the bank and dropped with it, and this returns ``no_work`` before issuing
-        a single query — no operation, and no per-write cost at all.
-
-        With a threshold set, this is called after a write that could have moved
-        the bank across it. Only writes move a bank, so there is nothing for a
-        periodic sweep to discover that the writer did not already know.
-        ``trigger`` says which way the bank moved, which is what lets the
-        pre-check settle most partitions from the catalog alone; see
-        :class:`CoverageTrigger`.
-
-        Idempotent and self-limiting three ways, so an unconditional caller pays
-        almost nothing on a converged bank: it plans first and short-circuits
-        with ``no_work=True`` when coverage already matches; it dedupes by bank
-        against a job that is pending *or* already running (the job re-plans from
-        live counts when it starts, so one in flight already covers a write that
-        landed after it was queued); and it will not re-submit for a bank
-        reconciled within the last ``vector_index_maintenance_min_interval_seconds``.
-
-        A no-op on backends without per-bank indexes (ScaNN keeps one global
-        index) and on Oracle (partitioned by bank, no partial vector indexes).
+        阈值关闭、后端不支持或覆盖已完整时不创建任务。其余情况沿用 bank 级
+        pending/processing 去重；后台任务记住最早执行时间，到期后重新规划实时
+        覆盖，不依赖下一次写入。任务自身的交接免冷却，以补齐运行期间的新变化。
+        同步后端没有 worker 接手延期，直接完成维护。
         """
         await self._authenticate_tenant(request_context)
 
@@ -23342,26 +23324,21 @@ class MemoryEngine(MemoryEngineInterface):
         if plan.is_empty:
             return {"operation_id": None, "no_work": True}
 
-        # There is work, but possibly not work worth doing yet. Index DDL is the
-        # expensive thing here, and two situations make a bank ask for it over
-        # and over: a partition oscillating across the threshold (each crossing
-        # is an ANN build or drop), and a build that keeps failing — the job logs
-        # rather than raises, so the plan stays non-empty and the next write
-        # queues it again. Both are damped by refusing to reconcile the same bank
-        # twice inside the interval. Checked only now, so a converged bank never
-        # pays for it, and skipped for the job's own hand-off, whose whole
-        # purpose is to re-check immediately when the bank moved under it.
-        if dedupe_excludes_operation_id is None:
+        from .task_backend import SyncTaskBackend
+
+        # 冷却只延迟 DDL，不丢弃已确认的索引缺口；没有后续写入时仍会由 worker 补齐。
+        # 同步后端没有 poller 负责延期，任务自身的交接也必须立即检查最新覆盖。
+        not_before: datetime | None = None
+        if dedupe_excludes_operation_id is None and not isinstance(self._task_backend, SyncTaskBackend):
             interval = per_bank_index_min_submit_interval_seconds()
             since = datetime.now(UTC) - timedelta(seconds=interval)
             try:
                 async with acquire_with_retry(backend) as conn:
                     recent = await conn.fetchval(
                         f"""
-                        SELECT 1 FROM {fq_table("async_operations")}
+                        SELECT MAX(created_at) FROM {fq_table("async_operations")}
                         WHERE bank_id = $1 AND operation_type = 'vector_index_maintenance'
                           AND created_at > $2
-                        LIMIT 1
                         """,
                         bank_id,
                         since,
@@ -23372,10 +23349,7 @@ class MemoryEngine(MemoryEngineInterface):
                 logger.warning(f"Vector index cooldown check failed for bank {bank_id}: {e}")
                 recent = None
             if recent is not None:
-                logger.debug(
-                    f"Vector index maintenance for bank {bank_id} deferred: reconciled within the last {interval}s"
-                )
-                return {"operation_id": None, "no_work": True}
+                not_before = recent + timedelta(seconds=interval)
 
         if self._operation_validator:
             from hindsight_api.extensions import BankWriteContext, BankWriteOperation
@@ -23388,6 +23362,8 @@ class MemoryEngine(MemoryEngineInterface):
             await self._validate_operation(self._operation_validator.validate_bank_write(ctx))
 
         task_payload: dict[str, Any] = {}
+        if not_before is not None:
+            task_payload["not_before"] = not_before.isoformat()
         if request_context.tenant_id:
             task_payload["_tenant_id"] = request_context.tenant_id
         if request_context.api_key_id:
@@ -23409,14 +23385,10 @@ class MemoryEngine(MemoryEngineInterface):
         )
 
     async def _handle_vector_index_maintenance(self, task_dict: dict) -> None:
-        """Reconcile one bank's vector indexes against the size threshold.
+        """到期后通过直连、自动提交会话维护索引，冷却由现有 worker 持久延期。
 
-        Runs on its own raw autocommit connection rather than a pooled one:
-        CREATE INDEX CONCURRENTLY cannot run inside a transaction block, and
-        both it and DROP INDEX CONCURRENTLY need a real backend session for the
-        whole statement. HINDSIGHT_API_MIGRATION_DATABASE_URL is preferred when
-        set, for the same reason migrations prefer it — a transaction-pooled URL
-        cannot hold a session across the statement.
+        CREATE/DROP INDEX CONCURRENTLY 不能使用事务连接池的会话语义，因此优先
+        沿用 migration URL；任务到期前不占用该直连，也不消耗失败重试次数。
         """
         import asyncpg
 
@@ -23434,6 +23406,12 @@ class MemoryEngine(MemoryEngineInterface):
         index_clause = bank_utils._vector_index_clause()
         if index_clause is None:
             return
+
+        # 沿用 DeferOperation -> next_retry_at；同一 pending 任务保留缺口，避免另建调度器。
+        if task_dict.get("not_before"):
+            not_before = datetime.fromisoformat(task_dict["not_before"])
+            if not_before > datetime.now(UTC):
+                raise DeferOperation(not_before, "vector index maintenance cooldown")
 
         # HINDSIGHT_API_MIGRATION_DATABASE_URL first when set — CREATE/DROP INDEX
         # CONCURRENTLY needs a real backend session for the whole statement, which

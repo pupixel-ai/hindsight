@@ -22,7 +22,9 @@ no LLM is needed, so memory_units are inserted directly. Tests lower the
 threshold rather than inserting ten thousand rows.
 """
 
+import json
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 from asyncpg.exceptions import DeadlockDetectedError
@@ -35,12 +37,13 @@ from hindsight_api.engine import vector_index_health
 from hindsight_api.engine.db_utils import acquire_with_retry, retry_with_backoff
 from hindsight_api.engine.memory_engine import MemoryEngine
 from hindsight_api.engine.retain import bank_utils
-from hindsight_api.engine.retain.fact_storage import ensure_bank_exists
 from hindsight_api.engine.retain.bank_utils import (
     _BANK_INDEX_FACT_TYPES,
     _bank_index_name,
     _vector_index_clause,
 )
+from hindsight_api.engine.retain.fact_storage import ensure_bank_exists
+from hindsight_api.engine.task_backend import WorkerTaskBackend
 from hindsight_api.engine.transfer import export_bank
 from hindsight_api.engine.vector_index_health import (
     CoverageTrigger,
@@ -1137,20 +1140,7 @@ class TestDirectionalPreCheck:
 
 
 class TestSubmissionCooldown:
-    """A bank cannot ask for index DDL again and again.
-
-    Two things make one bank re-submit indefinitely: a partition oscillating
-    across the threshold, and a build that keeps failing — the job logs rather
-    than raises, so the plan stays non-empty and the next write queues it again.
-    Both are damped by refusing to reconcile the same bank twice inside the
-    interval.
-
-    Each test has to leave the plan *non-empty* after the first operation, or it
-    would pass on the pre-check alone and prove nothing about the cooldown. The
-    suite's task backend is synchronous, so the first submit has already built
-    the indexes by the time it returns; dropping them again is what puts the bank
-    back in the state a real oscillation or a failed build leaves it in.
-    """
+    """有索引缺口时，冷却期间保留可去重的延期任务，不依赖未来写入重新触发。"""
 
     @staticmethod
     async def _submitted_then_still_due(memory, request_context, bank_id) -> str:
@@ -1172,19 +1162,31 @@ class TestSubmissionCooldown:
         return first["operation_id"]
 
     @pytest.mark.asyncio
-    async def test_second_submit_inside_the_interval_is_refused(
+    async def test_second_submit_inside_the_interval_is_queued_for_later(
         self, memory: MemoryEngine, request_context: RequestContext, low_threshold
     ):
+        """上次任务已完成时仍持久保留新缺口，后续提交复用同一 pending 任务。"""
         bank_id = await _seed_bank(memory, request_context, _BUILD_AT)
         try:
             await self._submitted_then_still_due(memory, request_context, bank_id)
+            memory._task_backend = WorkerTaskBackend()
 
             second = await memory.submit_async_vector_index_maintenance(
                 bank_id=bank_id, request_context=request_context, trigger=CoverageTrigger.GREW
             )
 
-            assert second["no_work"] is True
-            assert second["operation_id"] is None
+            assert second["operation_id"] is not None
+            async with acquire_with_retry(await memory._get_backend()) as conn:
+                payload = await conn.fetchval(
+                    "SELECT task_payload FROM async_operations WHERE operation_id = $1", second["operation_id"]
+                )
+            payload = json.loads(payload) if isinstance(payload, str) else payload
+            assert datetime.fromisoformat(payload["not_before"]) > datetime.now(UTC)
+            repeated = await memory.submit_async_vector_index_maintenance(
+                bank_id=bank_id, request_context=request_context, trigger=CoverageTrigger.GREW
+            )
+            assert repeated["deduplicated"] is True
+            assert repeated["operation_id"] == second["operation_id"]
         finally:
             async with acquire_with_retry(await memory._get_backend()) as conn:
                 await _drop_bank_indexes(conn, bank_id)
@@ -1222,10 +1224,11 @@ class TestSubmissionCooldown:
     async def test_a_zero_interval_turns_the_cooldown_off(
         self, memory: MemoryEngine, request_context: RequestContext, low_threshold, monkeypatch
     ):
-        """The damper has to be defeatable, or a genuine backlog cannot drain."""
+        """零冷却不应为正常后台任务附加延期时间。"""
         bank_id = await _seed_bank(memory, request_context, _BUILD_AT)
         try:
             await self._submitted_then_still_due(memory, request_context, bank_id)
+            memory._task_backend = WorkerTaskBackend()
 
             _patch_cooldown(monkeypatch, 0)
             second = await memory.submit_async_vector_index_maintenance(
