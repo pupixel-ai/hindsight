@@ -308,6 +308,7 @@ class PostgreSQLOps(DataAccessOps):
             *([keep_link_types] if keep_link_types else []),
         )
 
+    # 先排除可见的既有关系，再保护缺失关系的父事实，避免与级联删除反向等待。
     async def bulk_insert_links(
         self,
         conn: DatabaseConnection,
@@ -318,20 +319,11 @@ class PostgreSQLOps(DataAccessOps):
         exists_clause: str,
         chunk_size: int = 5000,
     ) -> None:
-        # exists_clause is unused on PostgreSQL: the memory_links → memory_units
-        # FKs are DEFERRABLE INITIALLY DEFERRED, so an INSERT takes no lock on the
-        # referenced parent rows until COMMIT — a concurrent committed DELETE in
-        # that window (consolidation pruning observations, document re-tracking)
-        # trips fk_memory_links_{to,from}_unit_id_memory_units at COMMIT (#1882),
-        # and a WHERE EXISTS guard can't prevent it (the row passes the check,
-        # then is deleted before the deferred check runs). Instead a CTE locks the
-        # referenced units FOR KEY SHARE in the *same statement*: the lock blocks a
-        # concurrent DELETE until our transaction commits and is held through the
-        # deferred check, and the INSERT only takes links whose endpoints are in
-        # the locked set, so rows that already vanished are dropped. Folding it
-        # into the one INSERT keeps this to a single round-trip — no extra query
-        # and no surrounding transaction needed. (Oracle's immediate FK has no
-        # such window and uses exists_clause via its own bulk_insert_links.)
+        if not sorted_links:
+            return
+        # 延迟FK直到提交才检查，缺失关系仍须保护两个父事实，防止并发删除造成FK失败。
+        # 已有关系在取得父行锁前排除，否则会一边持父行KEY SHARE、一边等删除事务的
+        # 关系唯一键；该删除又要升级父行锁，形成删除／重连等待环。
         from ..schema import fq_store_table
 
         mu_table = fq_store_table("memory_units")
@@ -345,23 +337,30 @@ class PostgreSQLOps(DataAccessOps):
             chunk_end = min(chunk_start + chunk_size, len(sorted_links))
             chunk_from = from_ids[chunk_start:chunk_end]
             chunk_to = to_ids[chunk_start:chunk_end]
-            # Distinct referenced parents, sorted so concurrent inserters acquire
-            # the row-share locks in a consistent order (avoids deadlocks; same
-            # convention as the (from, to) link sort).
-            referenced = sorted({str(x) for x in chunk_from} | {str(x) for x in chunk_to})
+            # 父行继续按ID取KEY SHARE；先物化缺失候选，不能在取得父锁后才检查旧边。
             await conn.execute(
                 f"""
-                WITH locked AS (
+                WITH missing AS MATERIALIZED (
+                    SELECT u.f, u.t, u.tp, u.w, u.e
+                    FROM unnest($1::uuid[], $2::uuid[], $3::text[], $4::float8[], $5::uuid[])
+                        AS u(f, t, tp, w, e)
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM {table} ml
+                        WHERE ml.bank_id = $6
+                          AND ml.from_unit_id = u.f AND ml.to_unit_id = u.t AND ml.link_type = u.tp
+                          AND COALESCE(ml.entity_id, '{nil_entity_uuid}'::uuid)
+                              = COALESCE(u.e, '{nil_entity_uuid}'::uuid)
+                    )
+                ), locked AS (
                     SELECT id FROM {mu_table}
-                    WHERE id = ANY($7::uuid[])
+                    WHERE id = ANY(ARRAY(SELECT f FROM missing UNION SELECT t FROM missing))
                     ORDER BY id
                     FOR KEY SHARE
                 )
                 INSERT INTO {table}
                     (from_unit_id, to_unit_id, link_type, weight, entity_id, bank_id)
                 SELECT f, t, tp, w, e, $6
-                FROM unnest($1::uuid[], $2::uuid[], $3::text[], $4::float8[], $5::uuid[])
-                    AS u(f, t, tp, w, e)
+                FROM missing
                 WHERE f IN (SELECT id FROM locked) AND t IN (SELECT id FROM locked)
                 ON CONFLICT (from_unit_id, to_unit_id, link_type,
                              COALESCE(entity_id, '{nil_entity_uuid}'::uuid))
@@ -373,7 +372,6 @@ class PostgreSQLOps(DataAccessOps):
                 weights[chunk_start:chunk_end],
                 entity_ids[chunk_start:chunk_end],
                 bank_id,
-                referenced,
                 timeout=300,
             )
 
