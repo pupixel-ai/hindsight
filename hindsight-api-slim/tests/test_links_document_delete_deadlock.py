@@ -198,3 +198,55 @@ async def test_existing_candidate_filter_preserves_full_link_identity(link_race:
         ("temporal", None),
         ("temporal", entity_id),
     ]
+
+
+async def test_default_chunks_preserve_input_order_after_missing_candidates_reorder(link_race: _Race) -> None:
+    """物化候选逆序后，两个默认5000分块写入仍必须按同一唯一键顺序推进。"""
+    race = link_race
+    ids = [uuid.UUID(int=10000 + i) for i in range(5010)]
+    await race.setup.executemany("INSERT INTO memory_units VALUES($1, 'keep', 'bank')", [(unit_id,) for unit_id in ids])
+    large_links = [(str(ids[i]), str(ids[i + 5]), "semantic", 0.9, None) for i in range(5000)]
+    extras = [(str(ids[i]), str(ids[j]), "semantic", 0.9, None) for i in range(100) for j in range(i + 6, i + 56)]
+    small_links = [large_links[0], *extras[1:], large_links[-1]]
+    first_chunk_done = asyncio.Event()
+    ops = PostgreSQLOps()
+
+    class ReorderedConnection(PostgresConnection):
+        """真实SQL反转物化候选，稳定模拟Hash分批等执行计划对输入顺序的破坏。"""
+
+        async def execute(self, query: str, *args, **kwargs) -> str:
+            """只改变中间CTE的输出顺序，保留生产最终INSERT及其排序规则。"""
+            boundary = "), locked AS ("
+            assert query.count(boundary) == 1
+            reordered = query.replace(boundary, "ORDER BY u.f DESC, u.t DESC\n                " + boundary)
+            return await super().execute(reordered, *args, **kwargs)
+
+    class PausingConnection(ReorderedConnection):
+        """首个5000块完成后，等竞争批持锁排队再推进第二块，固定等待环调度。"""
+
+        calls = 0
+
+        async def execute(self, query: str, *args, **kwargs) -> str:
+            """数据库屏障确保修复前一定出现反向唯一键等待，修复后两边均可完成。"""
+            result = await super().execute(query, *args, **kwargs)
+            self.calls += 1
+            if self.calls == 1:
+                first_chunk_done.set()
+                await _wait_blocked(race.setup, race.relink.get_server_pid())
+            return result
+
+    async def small_batch() -> None:
+        """5001候选的首块持最小共享键，第二块才插入最大的共享键。"""
+        async with race.delete.transaction():
+            await _bulk_insert_links(PausingConnection(race.delete), small_links, bank_id="bank", ops=ops)
+
+    async def large_batch() -> None:
+        """5000候选必须先等最小共享键，不能因中间重排先持最大的共享键。"""
+        await first_chunk_done.wait()
+        async with race.relink.transaction():
+            await _bulk_insert_links(ReorderedConnection(race.relink), large_links, bank_id="bank", ops=ops)
+
+    results = await asyncio.gather(small_batch(), large_batch(), return_exceptions=True)
+    assert not [r for r in results if isinstance(r, BaseException)], results
+    # 两批只有首尾两个重复键；直接计数可证明等待解除后没有丢失任何非重复候选。
+    assert await race.setup.fetchval("SELECT count(*) FROM memory_links WHERE link_type='semantic'") == 9999

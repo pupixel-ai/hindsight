@@ -341,9 +341,9 @@ class PostgreSQLOps(DataAccessOps):
             await conn.execute(
                 f"""
                 WITH missing AS MATERIALIZED (
-                    SELECT u.f, u.t, u.tp, u.w, u.e
+                    SELECT u.f, u.t, u.tp, u.w, u.e, u.input_order
                     FROM unnest($1::uuid[], $2::uuid[], $3::text[], $4::float8[], $5::uuid[])
-                        AS u(f, t, tp, w, e)
+                        WITH ORDINALITY AS u(f, t, tp, w, e, input_order)
                     WHERE NOT EXISTS (
                         SELECT 1 FROM {table} ml
                         WHERE ml.bank_id = $6
@@ -362,6 +362,8 @@ class PostgreSQLOps(DataAccessOps):
                 SELECT f, t, tp, w, e, $6
                 FROM missing
                 WHERE f IN (SELECT id FROM locked) AND t IN (SELECT id FROM locked)
+                -- Anti Join可按Hash分批重排候选，写入前必须恢复调用方的完整规范顺序。
+                ORDER BY input_order
                 ON CONFLICT (from_unit_id, to_unit_id, link_type,
                              COALESCE(entity_id, '{nil_entity_uuid}'::uuid))
                 DO NOTHING
