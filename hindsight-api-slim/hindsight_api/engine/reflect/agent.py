@@ -2598,7 +2598,7 @@ async def _execute_tool_with_timing(
     enabled_tools: frozenset[str] | None = None,
 ) -> tuple[dict[str, Any], int]:
     """Execute a tool call and return result with timing."""
-    from hindsight_api.tracing import get_tracer
+    from hindsight_api.tracing import get_tracer, set_span_io
 
     start_time = time.perf_counter()
 
@@ -2620,6 +2620,7 @@ async def _execute_tool_with_timing(
         span.set_attribute("hindsight.tool.name", normalized_name)
         span.set_attribute("hindsight.tool.id", tc.id)
         span.set_attribute("hindsight.tool.arguments", json.dumps(tc.arguments, ensure_ascii=False))
+        set_span_io(span, input=tc.arguments)
 
         try:
             result = await _execute_tool(
@@ -2647,6 +2648,7 @@ async def _execute_tool_with_timing(
 
             duration_ms = int((time.perf_counter() - start_time) * 1000)
             span.set_attribute("hindsight.tool.duration_ms", duration_ms)
+            set_span_io(span, output=result)
 
             # End span with correct timestamp
             end_time_ns = time.time_ns()  # noqa: TID251

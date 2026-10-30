@@ -405,6 +405,70 @@ def _truncate_content(content: str) -> str:
     return content
 
 
+def _langfuse_usage_details(
+    input_tokens: int, output_tokens: int, cached_tokens: int, thoughts_tokens: Optional[int]
+) -> dict[str, int]:
+    """Usage buckets in the shape Langfuse stores as-is (each key exclusive of the others).
+
+    ``input_tokens`` includes the cached prompt, so the cached part is moved into its
+    own bucket; ``output_tokens`` is already visible-only, so reasoning is additive.
+    Langfuse sums the buckets for ``total`` and prices each one by its key name.
+    """
+    cached = min(cached_tokens or 0, input_tokens)
+    usage = {"input": input_tokens - cached, "output": output_tokens}
+    if cached:
+        usage["input_cached_tokens"] = cached
+    if thoughts_tokens:
+        usage["output_reasoning_tokens"] = thoughts_tokens
+    return usage
+
+
+def set_span_io(span: Any, input: Any = None, output: Any = None) -> None:
+    """Attach input/output that Langfuse renders for a non-LLM span.
+
+    Operation spans otherwise carry only attributes and show ``undefined`` IO, and a
+    root span's IO is what the trace list displays.
+    """
+    if span is None:
+        return
+
+    def _dump(value: Any) -> str:
+        if isinstance(value, (dict, list)):
+            # default=str: IO payloads carry datetimes/enums the plain fallback rejects.
+            return json.dumps(value, default=str, ensure_ascii=False)
+        return _serialize_for_span(value)
+
+    try:
+        if input is not None:
+            span.set_attribute("langfuse.observation.input", _truncate_content(_dump(input)))
+        if output is not None:
+            span.set_attribute("langfuse.observation.output", _truncate_content(_dump(output)))
+    except Exception as e:
+        # Tracing must never break the operation it observes.
+        logger.warning(f"Failed to attach span IO: {e}")
+
+
+# Recall summaries keep the top hits only; full fact lists would dwarf the span.
+_RECALL_SPAN_MAX_FACTS = 20
+_RECALL_SPAN_MAX_TEXT = 300
+
+
+def summarize_recall_for_span(result: Any) -> dict[str, Any]:
+    """Compact view of a RecallResult: hit count plus the top facts, truncated."""
+    facts = list(getattr(result, "results", None) or [])
+    return {
+        "count": len(facts),
+        "facts": [
+            {
+                "id": str(getattr(f, "id", "")),
+                "fact_type": getattr(f, "fact_type", None),
+                "text": (getattr(f, "text", "") or "")[:_RECALL_SPAN_MAX_TEXT],
+            }
+            for f in facts[:_RECALL_SPAN_MAX_FACTS]
+        ],
+    }
+
+
 class LLMSpanRecorder:
     """
     Records OpenTelemetry spans for LLM calls following GenAI semantic conventions.
@@ -428,6 +492,7 @@ class LLMSpanRecorder:
         tool_calls: Optional[list[dict[str, Any]]] = None,
         cached_tokens: int = 0,
         thoughts_tokens: Optional[int] = None,
+        response_model: Optional[str] = None,
         **_extra: Any,
     ) -> None:
         """
@@ -452,6 +517,9 @@ class LLMSpanRecorder:
             cached_tokens: Cached/cache-read prompt tokens, when reported by the provider.
             thoughts_tokens: Reasoning tokens, when reported by the provider. Not part of
                 ``output_tokens``, which is visible-only.
+            response_model: Model that actually served the call, when the provider
+                reports it. A routing alias in ``model`` (e.g. a gateway dynamic route)
+                matches no price, so tracing backends need the routed model.
             _extra: Tolerated forward-compatible kwargs from other recorders.
         """
         try:
@@ -482,8 +550,12 @@ class LLMSpanRecorder:
                 # Set required attributes
                 span.set_attribute(GenAIAttributes.OPERATION_NAME, operation_name)
                 span.set_attribute(GenAIAttributes.PROVIDER_NAME, genai_provider)
+                served_model = response_model or model
                 span.set_attribute(GenAIAttributes.REQUEST_MODEL, model)
-                span.set_attribute(GenAIAttributes.RESPONSE_MODEL, model)
+                span.set_attribute(GenAIAttributes.RESPONSE_MODEL, served_model)
+                # Langfuse prices a generation by this name; its precedence over the
+                # gen_ai.* model attributes is documented, theirs relative to each other is not.
+                span.set_attribute("langfuse.observation.model.name", served_model)
                 span.set_attribute(GenAIAttributes.USAGE_INPUT_TOKENS, input_tokens)
                 span.set_attribute(GenAIAttributes.USAGE_OUTPUT_TOKENS, output_tokens)
                 if cached_tokens:
@@ -493,6 +565,10 @@ class LLMSpanRecorder:
                 # reasoning half of the billed output was invisible to OTel consumers.
                 if thoughts_tokens:
                     span.set_attribute("gen_ai.usage.reasoning_tokens", thoughts_tokens)
+                span.set_attribute(
+                    "langfuse.observation.usage_details",
+                    json.dumps(_langfuse_usage_details(input_tokens, output_tokens, cached_tokens, thoughts_tokens)),
+                )
 
                 # Add custom attributes for Hindsight context
                 span.set_attribute("hindsight.scope", scope)
@@ -507,7 +583,7 @@ class LLMSpanRecorder:
 
                 # Format messages for GenAI conventions (as JSON)
                 input_messages_json = self._format_messages(messages)
-                output_messages_json = self._format_output(response_content, finish_reason)
+                output_messages_json = self._format_output(response_content, finish_reason, tool_calls)
 
                 # Extract system instructions if present
                 system_instructions = self._extract_system_instructions(messages)
@@ -583,24 +659,23 @@ class LLMSpanRecorder:
         self,
         content: Optional[str],
         finish_reason: Optional[str],
+        tool_calls: Optional[list[dict[str, Any]]] = None,
     ) -> str:
         """Format output message into GenAI semantic convention format."""
         try:
-            if content is None:
+            if content is None and not tool_calls:
                 return "[]"
 
             # Truncate if needed
             if isinstance(content, str):
                 content = _truncate_content(content)
 
-            return json.dumps(
-                [
-                    {
-                        "role": "assistant",
-                        "content": content,
-                    }
-                ]
-            )
+            message: dict[str, Any] = {"role": "assistant", "content": content}
+            # A tool-calling turn usually has empty content; without the calls the
+            # output shows nothing of what the model decided.
+            if tool_calls:
+                message["tool_calls"] = tool_calls
+            return json.dumps([message], default=str)
         except Exception as e:
             logger.warning(f"Failed to format output message: {e}")
             return "[]"

@@ -23,7 +23,7 @@ import math
 import time
 import uuid
 from collections import defaultdict
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, nullcontext
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -3315,7 +3315,7 @@ async def _find_related_observations(
     """
     # Use recall to find related observations with token budget
     # max_tokens naturally limits how many observations are returned
-    from ...tracing import get_tracer, is_tracing_enabled
+    from ...tracing import get_tracer, is_tracing_enabled, set_span_io, summarize_recall_for_span
 
     # The consolidation pass hands in the config already resolved for its scope, so
     # a consolidation strategy's source-facts token limits reach this recall.
@@ -3327,20 +3327,20 @@ async def _find_related_observations(
     # SECURITY: Use all_strict matching if tags provided to prevent cross-scope consolidation
     tags_match = "all_strict" if tags else "any"
 
-    # Create span for recall operation within consolidation
-    tracer = get_tracer()
-    if is_tracing_enabled():
-        recall_span = tracer.start_span("hindsight.consolidation_recall")
-        recall_span.set_attribute("hindsight.bank_id", bank_id)
-        recall_span.set_attribute("hindsight.query", query[:100])  # Truncate for brevity
-        recall_span.set_attribute("hindsight.fact_type", "observation")
-    else:
-        recall_span = None
-
     # Resolve budget: consolidation doesn't need deep recall, default to LOW to reduce memory fan-out
     recall_budget = Budget(config.consolidation_recall_budget)
 
-    try:
+    # Current span, so the engine's hindsight.recall spans nest under it. A detached
+    # span left this one as an empty trace of its own and the recall as another root.
+    span_cm = (
+        get_tracer().start_as_current_span("hindsight.consolidation_recall") if is_tracing_enabled() else nullcontext()
+    )
+    with span_cm as recall_span:
+        if recall_span is not None:
+            recall_span.set_attribute("hindsight.bank_id", bank_id)
+            recall_span.set_attribute("hindsight.query", query[:100])  # Truncate for brevity
+            recall_span.set_attribute("hindsight.fact_type", "observation")
+            set_span_io(recall_span, input={"query": query, "fact_types": ["observation"], "tags": tags})
         recall_result = await memory_engine.recall_async(
             bank_id=bank_id,
             query=query,
@@ -3362,9 +3362,7 @@ async def _find_related_observations(
             reranking="interleave",
             _quiet=True,  # Suppress logging
         )
-    finally:
-        if recall_span:
-            recall_span.end()
+        set_span_io(recall_span, output=summarize_recall_for_span(recall_result))
 
     return recall_result
 
