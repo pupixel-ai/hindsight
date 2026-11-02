@@ -2864,6 +2864,18 @@ async def _process_memory_batch(
                     # half-applied batch orphan its sources forever: the pending-consolidation predicate
                     # excludes a stamped fact, so nothing would ever rebuild what the batch failed to
                     # write (#3876).
+                    # Creates, updates and folds above inherit the scope tags only; tags configured
+                    # to follow the sources are re-derived here, in the same transaction.
+                    inherited_prefixes = getattr(config, "observation_inherited_tag_prefixes", None)
+                    if inherited_prefixes and (prepared_updates or prepared_creates or merged_away):
+                        await get_memories().refresh_inherited_observation_tags(
+                            conn=conn,
+                            ops=memory_engine._backend.ops,
+                            fq_table=fq_table,
+                            bank_id=bank_id,
+                            unit_ids=[str(m["id"]) for m in memories],
+                            prefixes=list(inherited_prefixes),
+                        )
                     if stamp_ids:
                         await get_memories().mark_consolidated(
                             conn=conn,

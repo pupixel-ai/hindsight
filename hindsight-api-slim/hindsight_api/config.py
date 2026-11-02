@@ -919,6 +919,7 @@ ENV_CONSOLIDATION_USE_DECISION_MODEL = "HINDSIGHT_API_CONSOLIDATION_USE_DECISION
 ENV_OBSERVATIONS_MISSION = "HINDSIGHT_API_OBSERVATIONS_MISSION"
 ENV_MAX_OBSERVATIONS_PER_SCOPE = "HINDSIGHT_API_MAX_OBSERVATIONS_PER_SCOPE"
 ENV_OBSERVATION_SCOPE_LIMITS = "HINDSIGHT_API_OBSERVATION_SCOPE_LIMITS"
+ENV_OBSERVATION_INHERITED_TAG_PREFIXES = "HINDSIGHT_API_OBSERVATION_INHERITED_TAG_PREFIXES"
 ENV_CONSOLIDATION_STRATEGIES = "HINDSIGHT_API_CONSOLIDATION_STRATEGIES"
 ENV_ENABLE_OBSERVATION_HISTORY = "HINDSIGHT_API_ENABLE_OBSERVATION_HISTORY"
 ENV_OBSERVATION_HISTORY_MAX_ENTRIES = "HINDSIGHT_API_OBSERVATION_HISTORY_MAX_ENTRIES"
@@ -1895,6 +1896,10 @@ DEFAULT_MAX_OBSERVATIONS_PER_SCOPE = -1  # Max observations per tag scope (-1 = 
 # Per-scope overrides of the cap above: list of {"scope": [tag-globs], "limit": int}.
 # First rule whose pattern exact-covers a scope's tags wins; else the default above.
 DEFAULT_OBSERVATION_SCOPE_LIMITS: list | None = None
+# Tag prefixes an observation inherits from its source memories, on top of its scope:
+# e.g. ["person:", "place:"]. Tags under them always equal the union of the live
+# sources' tags under them. Empty: observations carry their scope tags only.
+DEFAULT_OBSERVATION_INHERITED_TAG_PREFIXES: list | None = None
 # Per-scope consolidation settings: list of
 # {"scopes": [{"tags": [tag-globs], "tags_match": "all"|"exact"}, ...], "observations_mission": str, ...}
 # (each setting optional). A strategy claims a scope when ANY of its patterns
@@ -3630,6 +3635,8 @@ class HindsightConfig:
     # DEPRECATED — superseded by consolidation_strategies below, which carries
     # the mission too. Still honoured, consulted after the strategies.
     observation_scope_limits: list | None
+    # Tag prefixes observations inherit from their sources, e.g. ["person:", "place:"].
+    observation_inherited_tag_prefixes: list | None
     # Per-scope consolidation settings (mission / observation cap).
     # Raw JSON shape: [{"scopes": [{"tags": ["company:*"]}], "observations_mission": "...",
     #                   "max_observations_per_scope": 20}, ...]
@@ -4026,6 +4033,7 @@ class HindsightConfig:
         "observations_mission",
         "max_observations_per_scope",
         "observation_scope_limits",
+        "observation_inherited_tag_prefixes",
         "consolidation_strategies",
         # Mental model settings
         "mental_model_min_refresh_interval_seconds",
@@ -5370,6 +5378,8 @@ class HindsightConfig:
             ),
             observation_scope_limits=json.loads(os.getenv(ENV_OBSERVATION_SCOPE_LIMITS, "null"))
             or DEFAULT_OBSERVATION_SCOPE_LIMITS,
+            observation_inherited_tag_prefixes=json.loads(os.getenv(ENV_OBSERVATION_INHERITED_TAG_PREFIXES, "null"))
+            or DEFAULT_OBSERVATION_INHERITED_TAG_PREFIXES,
             consolidation_strategies=json.loads(os.getenv(ENV_CONSOLIDATION_STRATEGIES, "null"))
             or DEFAULT_CONSOLIDATION_STRATEGIES,
             entity_labels=None,

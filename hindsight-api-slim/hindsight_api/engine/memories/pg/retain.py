@@ -290,6 +290,7 @@ async def relabel_document_memories(
     metadata: dict[str, Any],
     observation_scopes: list | str | None,
     final_tags: Callable[[list[str] | None], list[str]],
+    final_metadata: Callable[[dict[str, Any] | None], dict[str, Any]] | None = None,
 ) -> RelabelResult:
     """Set the document's tags, metadata and observation scoping on every memory it owns."""
     from ...consolidation.consolidator import write_scopes_changed
@@ -317,6 +318,11 @@ async def relabel_document_memories(
 
     new_metadata = drop_null_values(metadata)
     metadata_json = json.dumps(new_metadata)
+    # Per-unit metadata only when a label group keeps values there; otherwise every unit
+    # gets the document metadata, as before.
+    new_metadata_by_id = {
+        row["id"]: final_metadata(conn.parse_json(row["metadata"])) if final_metadata else new_metadata for row in prior
+    }
     scopes_json = json.dumps(observation_scopes) if observation_scopes is not None else None
 
     # Write only the units whose labels actually differ. `updated_at` is the "this fact was
@@ -326,15 +332,16 @@ async def relabel_document_memories(
     # Grouped by the FINAL array `final_tags` computed, so the value written is the one it
     # already deduped — a unit whose label tag is also a document tag must not come back
     # carrying it twice.
-    by_final: dict[tuple[str, ...], list] = {}
+    by_final: dict[tuple[tuple[str, ...], str], list] = {}
     for row in prior:
         final = new_tags_by_id[row["id"]]
+        final_meta = new_metadata_by_id[row["id"]]
         if (
             list(row["tags"] or []) != final
-            or (conn.parse_json(row["metadata"]) or {}) != new_metadata
+            or (conn.parse_json(row["metadata"]) or {}) != final_meta
             or conn.parse_json(row["observation_scopes"]) != observation_scopes
         ):
-            by_final.setdefault(tuple(final), []).append(row["id"])
+            by_final.setdefault((tuple(final), json.dumps(final_meta, sort_keys=True)), []).append(row["id"])
 
     # Id lists go out in chunks: on Oracle `= ANY` / `!= ALL` expand to an IN list, and one
     # longer than 1000 entries is rejected (ORA-01795) — a large document would fail its relabel.
@@ -342,7 +349,7 @@ async def relabel_document_memories(
         return [ids[i : i + 1000] for i in range(0, len(ids), 1000)]
 
     updated = 0
-    for final, ids in by_final.items():
+    for (final, final_metadata_json), ids in by_final.items():
         for chunk in _chunks(ids):
             result = await conn.execute(
                 f"""
@@ -353,7 +360,7 @@ async def relabel_document_memories(
                 bank_id,
                 document_id,
                 list(final),
-                metadata_json,
+                final_metadata_json,
                 scopes_json,
                 chunk,
             )

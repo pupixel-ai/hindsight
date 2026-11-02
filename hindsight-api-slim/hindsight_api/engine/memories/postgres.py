@@ -583,6 +583,9 @@ class PostgresMemories(MemoriesExtension):
             conn=conn, ops=ops, fq_table=fq_store_table, bank_id=bank_id, unit_ids=unit_ids
         )
 
+    async def set_memory_tags(self, *, conn, fq_table, bank_id: str, tags_by_id: Mapping[str, list[str]]) -> None:
+        await writes.set_memory_tags(conn=conn, fq_table=fq_store_table, bank_id=bank_id, tags_by_id=tags_by_id)
+
     async def delete_stale_observations(self, *, conn, ops, fq_table, bank_id: str, fact_ids: list) -> int:
         return await writes.delete_stale_observations(
             conn=conn, ops=ops, fq_table=fq_store_table, bank_id=bank_id, fact_ids=fact_ids
@@ -1253,6 +1256,7 @@ class PostgresMemories(MemoriesExtension):
         metadata: dict[str, Any],
         observation_scopes: list | str | None,
         final_tags: Callable[[list[str] | None], list[str]],
+        final_metadata: Callable[[dict[str, Any] | None], dict[str, Any]] | None = None,
     ) -> RelabelResult:
         return await pg_retain.relabel_document_memories(
             conn=conn,
@@ -1263,6 +1267,7 @@ class PostgresMemories(MemoriesExtension):
             metadata=metadata,
             observation_scopes=observation_scopes,
             final_tags=final_tags,
+            final_metadata=final_metadata,
         )
 
     async def memory_ids_for_chunks(self, *, conn, fq_table, bank_id: str, chunk_ids: list[str]) -> list[str]:

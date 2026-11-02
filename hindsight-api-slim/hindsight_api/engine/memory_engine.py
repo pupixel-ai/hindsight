@@ -734,7 +734,13 @@ from .retain.fact_storage import _normalize_scopes
 from .retain.fold import FoldMemberRef
 from .retain.types import RetainBatchResult, RetainContentDict, merge_processed_content_tokens
 from .search.reranking import CrossEncoderReranker, apply_combined_scoring
-from .search.tag_resolution import MAX_VOCABULARY, TagResolutionError, needs_resolution, resolve_tag_groups
+from .search.tag_resolution import (
+    MAX_VOCABULARY,
+    TagResolutionError,
+    fuzzy_namespaces,
+    needs_resolution,
+    resolve_tag_groups,
+)
 from .search.tags import (
     TagClause,
     TagGroup,
@@ -11149,9 +11155,11 @@ class MemoryEngine(MemoryEngineInterface):
                 # from the document. This PATCH re-processes nothing, so it has no business
                 # rewriting them: each unit keeps the ones it carries (issue #4068).
                 _label_keys: set[str] = set()
+                _inherited_prefixes: list[str] = []
                 if retag is not None:
                     _retag_config = await self._config_resolver.resolve_full_config(bank_id, request_context)
                     _label_keys = label_tag_keys(getattr(_retag_config, "entity_labels", None))
+                    _inherited_prefixes = list(_retag_config.observation_inherited_tag_prefixes or [])
 
                 def _retagged(existing: list[str] | None) -> list[str]:
                     if retag is None:
@@ -11209,6 +11217,20 @@ class MemoryEngine(MemoryEngineInterface):
                     )
                     invalidated_obs = retagged_result.invalidated_observations
                     requeued_units = retagged_result.requeued_units
+                if retag is not None and _inherited_prefixes:
+                    # Observations that survived the retag (their scope did not move) still
+                    # inherit from these memories: re-derive those tags in the same transaction.
+                    _units = await _store.document_source_units(
+                        conn=conn, fq_table=fq_table, bank_id=bank_id, document_id=document_id
+                    )
+                    await _store.refresh_inherited_observation_tags(
+                        conn=conn,
+                        ops=self._backend.ops,
+                        fq_table=fq_table,
+                        bank_id=bank_id,
+                        unit_ids=_units.unit_ids,
+                        prefixes=_inherited_prefixes,
+                    )
 
         if invalidated_obs > 0:
             # Observation units were deleted, changing the counts get_bank_stats
@@ -16232,8 +16254,9 @@ class MemoryEngine(MemoryEngineInterface):
         only ever see exact tags (#4026).
 
         The vocabulary comes from the store's own ``list_tags``, so Oracle and store-owned
-        backends need no separate path. A bank holding more distinct tags than
-        ``MAX_VOCABULARY`` is rejected rather than resolved against a truncated
+        backends need no separate path. Only the namespaces of the fuzzy tokens are read
+        (the whole bank when a token has no namespace). A namespace holding more distinct
+        tags than ``MAX_VOCABULARY`` is rejected rather than resolved against a truncated
         vocabulary, which would change which memories match with no signal to the caller.
         """
         if not tag_groups or not needs_resolution(tag_groups):
@@ -16243,17 +16266,24 @@ class MemoryEngine(MemoryEngineInterface):
 
         from .memories import get_memories
 
+        # Read only the namespaces the fuzzy tokens can match: the cap then bounds what a
+        # resolution actually compares against, not every tag the bank has ever seen.
+        namespaces = fuzzy_namespaces(tag_groups)
+        patterns = [None] if namespaces is None else [f"{ns}:*" for ns in sorted(namespaces)]
+        vocabulary: list[str] = []
         async with self._store_read_conn(bank_id) as conn:
-            page = await get_memories().list_tags(conn=conn, fq_table=fq_table, bank_id=bank_id, limit=MAX_VOCABULARY)
-
-        if page["total"] > MAX_VOCABULARY:
-            raise OperationValidationError(
-                f"Bank has {page['total']} distinct tags, above the {MAX_VOCABULARY} that "
-                f"fuzzy tag matching can resolve against. Use resolve='exact'.",
-                status_code=422,
-            )
-
-        vocabulary = [item["tag"] for item in page["items"]]
+            for pattern in patterns:
+                page = await get_memories().list_tags(
+                    conn=conn, fq_table=fq_table, bank_id=bank_id, pattern=pattern, limit=MAX_VOCABULARY
+                )
+                if page["total"] > MAX_VOCABULARY:
+                    scope = "Bank" if pattern is None else f"Namespace '{pattern}'"
+                    raise OperationValidationError(
+                        f"{scope} has {page['total']} distinct tags, above the {MAX_VOCABULARY} that "
+                        f"fuzzy tag matching can resolve against. Use resolve='exact'.",
+                        status_code=422,
+                    )
+                vocabulary.extend(item["tag"] for item in page["items"])
         try:
             return resolve_tag_groups(tag_groups, vocabulary)
         except TagResolutionError as e:

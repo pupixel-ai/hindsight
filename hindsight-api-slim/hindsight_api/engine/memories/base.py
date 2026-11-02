@@ -353,6 +353,37 @@ class StoredMemory:
     attachment_ids: list[str] = field(default_factory=list)
 
 
+def inherited_observation_tags(
+    observations: Sequence[StoredMemory], tags_by_id: Mapping[str, list[str]], prefixes: Sequence[str]
+) -> dict[str, list[str]]:
+    """The observations whose tags change, mapped to their new tags.
+
+    ``tags_by_id`` holds the current tags of the observations and of their sources.
+    Tags under ``prefixes`` are replaced by the union of the sources' tags under them;
+    every other tag the observation carries is kept as is.
+    """
+
+    def inherited(tag: str) -> bool:
+        return any(tag.startswith(prefix) for prefix in prefixes)
+
+    changed: dict[str, list[str]] = {}
+    for observation in observations:
+        current = list(tags_by_id.get(str(observation.unit_id), []))
+        kept = [tag for tag in current if not inherited(tag)]
+        from_sources = sorted(
+            {
+                tag
+                for source_id in observation.source_memory_ids
+                for tag in tags_by_id.get(str(source_id), [])
+                if inherited(tag)
+            }
+        )
+        new_tags = kept + [tag for tag in from_sources if tag not in kept]
+        if sorted(new_tags) != sorted(current):
+            changed[str(observation.unit_id)] = new_tags
+    return changed
+
+
 @dataclass
 class MemoryPatch:
     """A partial update to one memory. Unset fields are left alone.
@@ -2592,6 +2623,41 @@ class MemoriesExtension(Extension, ABC):
     ) -> list[StoredMemory]:
         """Observations consolidated from any of ``unit_ids``."""
 
+    async def refresh_inherited_observation_tags(
+        self, *, conn, ops, fq_table, bank_id: str, unit_ids: list[str], prefixes: list[str]
+    ) -> int:
+        """Re-derive the inherited tags of the observations built on ``unit_ids``.
+
+        An observation's tags starting with one of ``prefixes`` are owned by inheritance:
+        they become exactly the union of its live sources' tags with those prefixes, so a
+        tag removed from every source leaves the observation too. Its other tags (the
+        consolidation scope) are left alone. Returns how many observations changed.
+
+        Reads through :meth:`observations_for_sources` and :meth:`get_memories`, writes
+        through :meth:`set_memory_tags`.
+        """
+        observations = await self.observations_for_sources(
+            conn=conn, ops=ops, fq_table=fq_table, bank_id=bank_id, unit_ids=unit_ids
+        )
+        if not observations:
+            return 0
+        source_ids = list(dict.fromkeys(str(s) for o in observations for s in o.source_memory_ids))
+        rows = await self.get_memories(
+            conn=conn,
+            fq_table=fq_table,
+            bank_id=bank_id,
+            unit_ids=[o.unit_id for o in observations] + source_ids,
+        )
+        tags_by_id = {m.unit_id: m.tags for m in rows}
+        changed = inherited_observation_tags(observations, tags_by_id, prefixes)
+        if changed:
+            await self.set_memory_tags(conn=conn, fq_table=fq_table, bank_id=bank_id, tags_by_id=changed)
+        return len(changed)
+
+    async def set_memory_tags(self, *, conn, fq_table, bank_id: str, tags_by_id: Mapping[str, list[str]]) -> None:
+        """Replace the tags of the given memories. Default: :meth:`update_memories`."""
+        await self.update_memories(bank_id, [MemoryPatch(unit_id=uid, tags=tags) for uid, tags in tags_by_id.items()])
+
     @abstractmethod
     async def delete_stale_observations(self, *, conn, ops, fq_table, bank_id: str, fact_ids: list) -> int:
         """Delete observations built on ``fact_ids`` and requeue surviving sources.
@@ -3541,10 +3607,12 @@ class MemoriesExtension(Extension, ABC):
         metadata: dict[str, Any],
         observation_scopes: list | str | None,
         final_tags: Callable[[list[str] | None], list[str]],
+        final_metadata: Callable[[dict[str, Any] | None], dict[str, Any]] | None = None,
     ) -> RelabelResult:
         """Give every memory of the document the document's current tags, metadata and
         observation scoping. ``final_tags`` maps a memory's current tags to the ones it ends with
-        (the document tags, plus the label projection it already carries)."""
+        (the document tags, plus the label projection it already carries); ``final_metadata``,
+        when given, does the same for metadata (default: the document metadata as is)."""
         from ..consolidation.consolidator import write_scopes_changed
         from ..metadata_utils import drop_null_values
 
@@ -3566,6 +3634,9 @@ class MemoriesExtension(Extension, ABC):
         # whose metadata was cleared must clear on its survivors too, which an absent key would not do.
         new_tags_by_unit = {m.unit_id: final_tags(m.tags) for m in page.memories}
         new_metadata = drop_null_values(metadata or {})
+        new_metadata_by_unit = {
+            m.unit_id: final_metadata(m.metadata) if final_metadata else new_metadata for m in page.memories
+        }
         # Only memories whose labels actually differ: a patch moves `updated_at`, the "this
         # fact was edited" signal consolidation discards an in-flight batch on (#5614), so a
         # re-send of an unchanged document must patch nothing.
@@ -3574,13 +3645,13 @@ class MemoriesExtension(Extension, ABC):
                 unit_id=m.unit_id,
                 tags=new_tags_by_unit[m.unit_id],
                 metadata={
-                    META_METADATA_JSON: json.dumps(new_metadata),
+                    META_METADATA_JSON: json.dumps(new_metadata_by_unit[m.unit_id]),
                     META_OBSERVATION_SCOPES: json.dumps(observation_scopes),
                 },
             )
             for m in page.memories
             if m.tags != new_tags_by_unit[m.unit_id]
-            or (m.metadata or {}) != new_metadata
+            or (m.metadata or {}) != new_metadata_by_unit[m.unit_id]
             or m.observation_scopes != observation_scopes
         ]
         # Against the tags the unit will actually END with, not the document's: a survivor
