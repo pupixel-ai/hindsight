@@ -17331,7 +17331,7 @@ class MemoryEngine(MemoryEngineInterface):
         tags: list[str] | None,
         max_tokens: int | None,
         trigger: dict[str, Any] | None,
-    ) -> ResultRow:
+    ) -> ResultRow | None:
         """Insert a pinned model using the caller's transaction.
 
         ``content`` is stored as the render of its own structure: a mental model
@@ -17367,6 +17367,10 @@ class MemoryEngine(MemoryEngineInterface):
             embedding = None
         sv_col = ", search_vector" if sv_expr else ""
         sv_val = f", {sv_expr}" if sv_expr else ""
+        # Keep Oracle on its native INSERT path: its compatibility rewrite cannot
+        # preserve RETURNING while emulating DO NOTHING, so a successful insert and
+        # a conflict would both look like an empty result to the caller.
+        conflict_clause = "ON CONFLICT (bank_id, id) DO NOTHING" if conn.backend_type == "postgresql" else ""
         row = await conn.fetchrow(
             f"""
             INSERT INTO {fq_table("mental_models")}
@@ -17374,6 +17378,7 @@ class MemoryEngine(MemoryEngineInterface):
              trigger, structured_content{sv_col})
             VALUES ($1, $2, 'pinned', $3::text, ' ', $4, $5, $6, $7, COALESCE($8, 2048),
                     COALESCE($9, '{{"refresh_after_consolidation": false}}'::jsonb), $10{sv_val})
+            {conflict_clause}
             RETURNING id, bank_id, name, source_query, content, tags,
                       last_refreshed_at, last_memory_seen_at, last_refresh_failed_at, last_full_refreshed_at, created_at, reflect_response,
                       max_tokens, trigger, structured_content
@@ -17389,7 +17394,6 @@ class MemoryEngine(MemoryEngineInterface):
             json.dumps(trigger) if trigger else None,
             json.dumps(document.structure.model_dump()),
         )
-        assert row is not None
         return row
 
     async def create_mental_model(
@@ -17471,17 +17475,23 @@ class MemoryEngine(MemoryEngineInterface):
                         max_tokens=max_tokens,
                         trigger=trigger,
                     )
+                    if row is None:
+                        from hindsight_api.extensions import OperationValidationError
+
+                        raise OperationValidationError(
+                            f"Mental model '{mental_model_id}' already exists in bank '{bank_id}'",
+                            status_code=409,
+                        )
                 # After the transaction commits: the index is derived from a row that must already
                 # exist, and indexing inside the transaction would publish a page a rollback then
                 # un-creates.
                 await self._index_knowledge_page(conn, bank_id, mental_model_id, embedding=embedding_vec)
         except asyncpg.UniqueViolationError as exc:
-            # mental_models_pkey is the table's only unique constraint, so a violation naming
-            # this table is the caller's id colliding with a model that already exists. Anything
-            # else is a real failure and must not be reported as a duplicate model:
+            # Only the primary key means the caller's id collides with a model that already
+            # exists. Anything else is a real failure and must not be reported as a duplicate:
             # _ensure_bank_exists creates this bank's vector indexes in the same transaction,
             # and a cross-process CREATE INDEX race collides in pg_class, not here.
-            if getattr(exc, "table_name", None) != "mental_models":
+            if getattr(exc, "constraint_name", None) != "mental_models_pkey":
                 raise
             # Local, like every other OperationValidationError import in this module: the
             # extensions package pulls in MCPExtension, which imports MemoryEngine back.
@@ -19757,6 +19767,13 @@ class MemoryEngine(MemoryEngineInterface):
                         max_tokens=effective_max_tokens,
                         trigger=effective_trigger,
                     )
+                    if mm_row is None:
+                        from hindsight_api.extensions import OperationValidationError
+
+                        raise OperationValidationError(
+                            f"Mental model '{mental_model_id}' already exists in bank '{bank_id}'",
+                            status_code=409,
+                        )
                     row = await conn.fetchrow(
                         f"""
                         INSERT INTO {fq_table("knowledge_pages")}
