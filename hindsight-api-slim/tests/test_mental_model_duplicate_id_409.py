@@ -14,7 +14,7 @@ import pytest_asyncio
 
 from hindsight_api.engine.cross_encoder import RRFPassthroughCrossEncoder
 from hindsight_api.engine.embeddings import Embeddings
-from hindsight_api.engine.memory_engine import MemoryEngine
+from hindsight_api.engine.memory_engine import MemoryEngine, acquire_with_retry
 from hindsight_api.engine.query_analyzer import DateparserQueryAnalyzer
 from hindsight_api.engine.task_backend import SyncTaskBackend
 from hindsight_api.extensions import OperationValidationError
@@ -113,6 +113,67 @@ async def test_concurrent_duplicate_mental_model_id_creates_once(conflict_memory
         page = await conflict_memory.list_mental_models(bank_id=bank_id, request_context=request_context)
         assert [model["id"] for model in page.items] == [mental_model_id]
     finally:
+        await conflict_memory.delete_bank(bank_id, request_context=request_context)
+
+
+async def test_uncommitted_duplicate_returns_conflict_without_unique_violation(
+    conflict_memory: MemoryEngine, request_context, monkeypatch
+):
+    bank_id = f"test-mm-uncommitted-{uuid.uuid4().hex[:8]}"
+    mental_model_id = "travel"
+    await conflict_memory.ensure_bank_profile(bank_id=bank_id, request_context=request_context)
+    backend = await conflict_memory._get_backend()
+    reached_competing_insert = asyncio.Event()
+    original_insert = conflict_memory._insert_pinned_mental_model
+    competing_create = None
+
+    try:
+        async with acquire_with_retry(backend) as winner_conn:
+            async with winner_conn.transaction():
+                winner = await original_insert(
+                    winner_conn,
+                    mental_model_id=mental_model_id,
+                    bank_id=bank_id,
+                    name="Travel",
+                    source_query="where has this user travelled",
+                    content="",
+                    embedding=None,
+                    tags=None,
+                    max_tokens=None,
+                    trigger=None,
+                )
+                assert winner is not None
+
+                async def mark_competing_insert(conn, **kwargs):
+                    reached_competing_insert.set()
+                    return await original_insert(conn, **kwargs)
+
+                monkeypatch.setattr(conflict_memory, "_insert_pinned_mental_model", mark_competing_insert)
+                competing_create = asyncio.create_task(
+                    conflict_memory.create_mental_model(
+                        bank_id,
+                        "Travel",
+                        "where has this user travelled",
+                        "",
+                        mental_model_id=mental_model_id,
+                        request_context=request_context,
+                    )
+                )
+                await asyncio.wait_for(reached_competing_insert.wait(), timeout=2)
+                await asyncio.sleep(0)
+                assert not competing_create.done()
+
+        with pytest.raises(OperationValidationError) as excinfo:
+            await competing_create
+        assert excinfo.value.status_code == 409
+        assert not isinstance(excinfo.value.__cause__, asyncpg.UniqueViolationError)
+
+        page = await conflict_memory.list_mental_models(bank_id=bank_id, request_context=request_context)
+        assert [model["id"] for model in page.items] == [mental_model_id]
+    finally:
+        if competing_create is not None and not competing_create.done():
+            competing_create.cancel()
+            await asyncio.gather(competing_create, return_exceptions=True)
         await conflict_memory.delete_bank(bank_id, request_context=request_context)
 
 
