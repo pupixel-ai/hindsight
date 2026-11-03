@@ -488,7 +488,7 @@ from . import (
 )
 from . import timing as _timing
 from .embedding_coalescer import CoalescingEmbedder
-from .entity_labels import label_tag_keys
+from .entity_labels import label_metadata_keys, label_tag_keys
 from .memory_budget import PRODUCER_WAITING, RetainMemoryBudget, estimate_chunk_bytes
 from .types import (
     CausalRelation,
@@ -4176,6 +4176,8 @@ async def _try_delta_retain(
                     retain_params.get("metadata", {}),
                     observation_scopes=retain_params.get("observation_scopes"),
                     label_tag_keys=label_tag_keys(getattr(config, "entity_labels", None)),
+                    label_metadata_keys=label_metadata_keys(getattr(config, "entity_labels", None)),
+                    inherited_tag_prefixes=getattr(config, "observation_inherited_tag_prefixes", None),
                     ops=pool.ops,
                 )
                 log_buffer.append(
@@ -4350,6 +4352,8 @@ async def _delta_metadata_only(
                     retain_params.get("metadata", {}),
                     observation_scopes=retain_params.get("observation_scopes"),
                     label_tag_keys=label_tag_keys(getattr(config, "entity_labels", None)),
+                    label_metadata_keys=label_metadata_keys(getattr(config, "entity_labels", None)),
+                    inherited_tag_prefixes=getattr(config, "observation_inherited_tag_prefixes", None),
                     ops=pool.ops,
                 )
         if outbox_callback is not None:
@@ -4397,6 +4401,8 @@ async def _delta_metadata_only(
                 retain_params.get("metadata", {}),
                 observation_scopes=retain_params.get("observation_scopes"),
                 label_tag_keys=label_tag_keys(getattr(config, "entity_labels", None)),
+                label_metadata_keys=label_metadata_keys(getattr(config, "entity_labels", None)),
+                inherited_tag_prefixes=getattr(config, "observation_inherited_tag_prefixes", None),
                 ops=pool.ops,
             )
             if outbox_callback is not None:

@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from ....config import get_config
@@ -623,3 +623,24 @@ __all__ = [
     "set_invalidation_reason",
     "set_memory_embedding",
 ]
+
+
+async def set_memory_tags(
+    *,
+    conn,
+    fq_table: Callable[[str], str],
+    bank_id: str,
+    tags_by_id: Mapping[str, list[str]],
+) -> None:
+    """Replace the tags of the given memories, one UPDATE per memory."""
+    for unit_id, tags in tags_by_id.items():
+        await conn.execute(
+            f"""
+            UPDATE {fq_table("memory_units")}
+            SET tags = $3, updated_at = NOW()
+            WHERE bank_id = $1 AND id = $2
+            """,
+            bank_id,
+            uuid.UUID(str(unit_id)),
+            list(tags),
+        )

@@ -38,6 +38,7 @@ from .entity_labels import (
     build_labels_lookup,
     build_labels_model,
     is_label_entity,
+    label_metadata_keys,
     label_tag_keys,
     parse_entity_labels,
     split_label_tags,
@@ -3402,6 +3403,7 @@ async def extract_facts_from_contents_batch_api(
 
     # Step 8: Auto-tag facts from label groups with tag=True
     _inject_label_tags(extracted_facts, config)
+    _move_metadata_labels(extracted_facts, config)
 
     await _write_batch_extraction_errors(pool, operation_id, schema, extraction_errors)
 
@@ -3623,6 +3625,7 @@ async def extract_facts_from_contents(
 
     # Step 6: Auto-tag facts from label groups with tag=True
     _inject_label_tags(extracted_facts, config)
+    _move_metadata_labels(extracted_facts, config)
 
     return ExtractionResult(extracted_facts, chunks_metadata, total_usage)
 
@@ -3722,6 +3725,32 @@ def _add_temporal_offsets(facts: list[ExtractedFactType], contents: list[RetainC
             fact.occurred_end = parse_datetime_flexible(fact.occurred_end) + offset
         if fact.mentioned_at:
             fact.mentioned_at = parse_datetime_flexible(fact.mentioned_at) + offset
+
+
+def _move_metadata_labels(facts: list[ExtractedFactType], config) -> None:
+    """
+    Move the values of ``store: metadata`` label groups out of each fact's entities and
+    into ``metadata[key]`` as a JSON array. Modifies facts in place.
+
+    Entities are linked in the graph and appended to the embedded text, so a per-fact
+    attribute such as a source id would otherwise pull facts together by that id alone.
+    """
+    keys = {key.lower(): key for key in label_metadata_keys(config.entity_labels)}
+    if not keys:
+        return
+    for fact in facts:
+        values: dict[str, list[str]] = {}
+        kept: list[str] = []
+        for entity in fact.entities:
+            prefix, sep, value = entity.partition(":")
+            key = keys.get(prefix.lower()) if sep else None
+            if key is None:
+                kept.append(entity)
+            elif value not in values.setdefault(key, []):
+                values[key].append(value)
+        if values:
+            fact.entities = kept
+            fact.metadata = {**(fact.metadata or {}), **{k: json.dumps(v) for k, v in values.items()}}
 
 
 def _inject_label_tags(facts: list[ExtractedFactType], config) -> None:

@@ -9446,6 +9446,21 @@
             "title": "Observation Scope Limits",
             "description": "DEPRECATED \u2014 use consolidation_strategies, which carries the mission too. Still honoured, but consulted only after consolidation_strategies. Per-scope overrides of max_observations_per_scope: [{\"scope\": [\"run_*\", \"shared\"], \"limit\": 1}]. Each scope is a list of fnmatch tag-globs; a consolidation scope matches under exact cover (every tag matched by a glob and every glob matched by a tag). The first matching rule wins; unmatched scopes fall back to max_observations_per_scope."
           },
+          "observation_inherited_tag_prefixes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observation Inherited Tag Prefixes",
+            "description": "Tag prefixes observations inherit from their source memories, e.g. [\"person:\", \"place:\"]. An observation's tags under these prefixes always equal the union of its live sources' tags under them; its scope tags are unaffected."
+          },
           "consolidation_strategies": {
             "anyOf": [
               {
@@ -13690,6 +13705,15 @@
             "type": "object",
             "title": "Fields",
             "default": {}
+          },
+          "store": {
+            "type": "string",
+            "enum": [
+              "entity",
+              "metadata"
+            ],
+            "title": "Store",
+            "default": "entity"
           }
         },
         "type": "object",
@@ -13747,6 +13771,15 @@
             "type": "object",
             "title": "Fields",
             "default": {}
+          },
+          "store": {
+            "type": "string",
+            "enum": [
+              "entity",
+              "metadata"
+            ],
+            "title": "Store",
+            "default": "entity"
           }
         },
         "type": "object",

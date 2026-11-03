@@ -14,6 +14,7 @@ from hindsight_api.engine.search.tag_resolution import (
     MIN_SIMILARITY,
     TagResolutionError,
     expand_token,
+    fuzzy_namespaces,
     needs_resolution,
     resolve_tag_groups,
 )
@@ -312,3 +313,28 @@ def test_needs_resolution_walks_the_whole_tree():
             )
         ]
     )
+
+
+def test_fuzzy_namespaces_collects_only_fuzzy_tokens():
+    groups = [
+        TagGroupLeaf(tags=["day:2025-01-01"], match="any_strict"),
+        TagGroupAnd(
+            filters=[
+                TagGroupLeaf(tags=["Place:Los-Angles", "user:alcie"], match="all_strict", resolve="fuzzy"),
+                TagGroupNot(filter=TagGroupLeaf(tags=["place:paris"], match="any_strict", resolve="fuzzy")),
+            ]
+        ),
+    ]
+    # Exact leaves need no vocabulary; namespaces are compared case-insensitively.
+    assert fuzzy_namespaces(groups) == {"place", "user"}
+
+
+def test_fuzzy_namespaces_needs_the_whole_bank_for_an_unnamespaced_token():
+    groups = [TagGroupLeaf(tags=["place:paris", "typsecript"], match="any_strict", resolve="fuzzy")]
+    assert fuzzy_namespaces(groups) is None
+
+
+def test_namespace_vocabulary_resolves_like_the_whole_bank():
+    groups = [TagGroupLeaf(tags=["user:alcie"], match="any_strict", resolve="fuzzy")]
+    in_namespace = [tag for tag in VOCABULARY if tag.startswith("user:")]
+    assert resolve_tag_groups(groups, in_namespace) == resolve_tag_groups(groups, VOCABULARY)

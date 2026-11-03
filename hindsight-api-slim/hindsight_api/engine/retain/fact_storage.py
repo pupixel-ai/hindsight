@@ -485,6 +485,8 @@ async def update_memory_units_metadata_and_tags(
     *,
     observation_scopes: list | str | None = None,
     label_tag_keys: set[str] | None = None,
+    label_metadata_keys: set[str] | None = None,
+    inherited_tag_prefixes: list[str] | None = None,
     ops=None,
 ) -> int:
     """Update document-level attributes on existing memory units.
@@ -509,6 +511,10 @@ async def update_memory_units_metadata_and_tags(
     Passing no ``label_tag_keys`` (or a bank with no such group) keeps the plain
     overwrite, which is what a document with no label projection wants.
 
+    ``label_metadata_keys`` is the same carry-forward for ``store: metadata`` label
+    groups: a survivor keeps those keys of its metadata, everything else is replaced by
+    the document's metadata.
+
     ``metadata`` arrives as the raw retain_params bag (the document row keeps
     the caller's input verbatim), so null-valued keys are dropped here — the
     same normalization ``RetainContent`` applies to freshly extracted facts
@@ -532,6 +538,7 @@ async def update_memory_units_metadata_and_tags(
         Number of memory units updated.
     """
     from ..memories import get_memories
+    from ..metadata_utils import drop_null_values
     from .entity_labels import split_label_tags
 
     def _tags_for(existing: list[str] | None) -> list[str]:
@@ -543,6 +550,11 @@ async def update_memory_units_metadata_and_tags(
                 seen.add(t)
                 merged.append(t)
         return merged
+
+    def _metadata_for(existing: dict[str, Any] | None) -> dict[str, Any]:
+        """The document metadata, plus the label values this unit already carries."""
+        kept = {k: v for k, v in (existing or {}).items() if k in (label_metadata_keys or ())}
+        return {**drop_null_values(metadata or {}), **kept}
 
     store = get_memories()
     # The survivors' tags, metadata and scoping, written by whichever store holds them. It
@@ -557,8 +569,24 @@ async def update_memory_units_metadata_and_tags(
         metadata=metadata,
         observation_scopes=observation_scopes,
         final_tags=_tags_for,
+        final_metadata=_metadata_for if label_metadata_keys else None,
     )
     rescoped_ids = relabelled.rescoped_unit_ids
+
+    if inherited_tag_prefixes and relabelled.updated:
+        # Observations whose scope did not move keep standing on these units; the tags they
+        # inherit (``observation_inherited_tag_prefixes``) follow the relabel.
+        units = await store.document_source_units(
+            conn=conn, fq_table=fq_table, bank_id=bank_id, document_id=document_id
+        )
+        await store.refresh_inherited_observation_tags(
+            conn=conn,
+            ops=ops,
+            fq_table=fq_table,
+            bank_id=bank_id,
+            unit_ids=units.unit_ids,
+            prefixes=inherited_tag_prefixes,
+        )
 
     if rescoped_ids:
         await delete_stale_observations_for_memories(conn, bank_id, rescoped_ids, ops=ops)

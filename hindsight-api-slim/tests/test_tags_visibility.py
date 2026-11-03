@@ -2110,6 +2110,48 @@ async def test_fuzzy_tag_group_reaches_a_misspelled_tag(api_client):
 
 
 @pytest.mark.asyncio
+async def test_fuzzy_vocabulary_cap_applies_per_namespace(api_client, monkeypatch):
+    """
+    A namespace that grows without bound (one ``day:`` tag per day) must not block fuzzy
+    matching in another namespace: only the fuzzy token's namespace is read and capped.
+    A token without a namespace still needs the whole bank and still hits the cap.
+    """
+    from hindsight_api.engine import memory_engine
+
+    monkeypatch.setattr(memory_engine, "MAX_VOCABULARY", 2)
+    bank_id = f"tg_fuzzy_ns_{datetime.now().timestamp()}"
+    retain = await api_client.post(
+        f"/v1/default/banks/{bank_id}/memories",
+        json={
+            "items": [
+                {
+                    "content": "We watched the sunset at Santa Monica pier.",
+                    "tags": ["place:los-angeles", "day:2025-01-01", "day:2025-01-02", "day:2025-01-03"],
+                },
+            ]
+        },
+    )
+    assert retain.status_code == 200
+
+    def recall(tag: str):
+        return api_client.post(
+            f"/v1/default/banks/{bank_id}/memories/recall",
+            json={
+                "query": "sunset",
+                "budget": "mid",
+                "tag_groups": [{"tags": [tag], "match": "any_strict", "resolve": "fuzzy"}],
+            },
+        )
+
+    namespaced = await recall("place:los-angles")
+    assert namespaced.status_code == 200
+    assert namespaced.json()["results"], "The place namespace holds one tag, well under the cap"
+
+    unnamespaced = await recall("los-angles")
+    assert unnamespaced.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_exact_resolution_is_the_default_and_still_filters_out_typos(api_client):
     """The default is unchanged: a misspelled tag matches nothing."""
     bank_id = f"tg_exact_{datetime.now().timestamp()}"

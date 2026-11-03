@@ -8,7 +8,7 @@ at retain time and stored as entities.
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, Field, create_model, model_validator
 
 
 class LabelValue(BaseModel):
@@ -40,6 +40,17 @@ class LabelGroup(BaseModel):
     tag: bool = False
     values: list[LabelValue] = []
     fields: dict[str, MapField] = {}
+    #: Where extracted values are kept. ``entity`` (default) stores ``key:value`` entities,
+    #: which also link facts in the graph and are appended to the embedded text.
+    #: ``metadata`` stores the values as a JSON array under ``metadata[key]`` instead —
+    #: for per-fact attributes (a source id, say) that must not move retrieval.
+    store: Literal["entity", "metadata"] = "entity"
+
+    @model_validator(mode="after")
+    def _metadata_store_is_flat(self) -> "LabelGroup":
+        if self.store == "metadata" and (self.tag or self.type == "map"):
+            raise ValueError("store='metadata' label groups cannot be tags or map-typed")
+        return self
 
 
 class EntityLabelsConfig(BaseModel):
@@ -324,6 +335,23 @@ def label_tag_keys(labels_cfg: "EntityLabelsConfig | dict | list | None") -> set
             return set()
         labels_cfg = parsed
     return {g.key.lower() for g in labels_cfg.attributes if g.tag and g.key}
+
+
+def label_metadata_keys(labels_cfg: "EntityLabelsConfig | dict | list | None") -> set[str]:
+    """The label group keys whose values are kept in fact metadata (``store: metadata``).
+
+    Like label tags these are derived per fact at extraction, so a re-retain survivor —
+    which was not re-extracted — carries them forward instead of losing them to the
+    document's metadata.
+    """
+    if labels_cfg is None:
+        return set()
+    if not isinstance(labels_cfg, EntityLabelsConfig):
+        parsed = parse_entity_labels(labels_cfg)
+        if parsed is None:
+            return set()
+        labels_cfg = parsed
+    return {g.key for g in labels_cfg.attributes if g.store == "metadata" and g.key}
 
 
 def label_tag_candidates(labels_cfg: "EntityLabelsConfig | dict | list | None") -> list[str]:

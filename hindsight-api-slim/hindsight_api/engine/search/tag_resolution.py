@@ -49,7 +49,8 @@ from .tags import TagGroup, TagGroupAnd, TagGroupLeaf, TagGroupNot, TagGroupOr
 #: ``similarity()`` (#3107) — rather than growing a second notion of name similarity.
 MIN_SIMILARITY = 0.45
 
-#: Distinct tags a bank may hold before fuzzy matching refuses to run.
+#: Distinct tags a fuzzy token's namespace may hold before fuzzy matching refuses to run
+#: (the whole bank, for a token without a namespace).
 #: Resolution enumerates the vocabulary, and matching against a silently truncated one
 #: would change which memories match with no signal to the caller, so an oversized bank is
 #: rejected (422) rather than quietly given different results.
@@ -213,6 +214,39 @@ def needs_resolution(tag_groups: list[TagGroup] | None) -> bool:
         return False
 
     return any(_walk(group) for group in tag_groups)
+
+
+def fuzzy_namespaces(tag_groups: list[TagGroup] | None) -> set[str] | None:
+    """The namespaces the fuzzy tokens in ``tag_groups`` live in, or ``None`` for "all".
+
+    ``expand_token`` only ever compares a token with tags of its own namespace, so the
+    vocabulary a resolution needs is the union of those namespaces — not the whole bank.
+    A bank whose tags grow without bound in one namespace (a ``date:`` tag per day, say)
+    therefore never blocks fuzzy matching in another. A token without a namespace can
+    match any un-namespaced tag, which a namespace pattern cannot select, so it returns
+    ``None`` and the caller falls back to the whole vocabulary.
+    """
+    namespaces: set[str] = set()
+
+    def _walk(group: TagGroup) -> bool:
+        if isinstance(group, TagGroupLeaf):
+            if group.resolve == "exact":
+                return True
+            for token in group.tags:
+                namespace, _ = _split_namespace(_normalize(token))
+                if not namespace:
+                    return False
+                namespaces.add(namespace)
+            return True
+        if isinstance(group, (TagGroupAnd, TagGroupOr)):
+            return all(_walk(child) for child in group.filters)
+        if isinstance(group, TagGroupNot):
+            return _walk(group.filter)
+        return True
+
+    if not all(_walk(group) for group in tag_groups or []):
+        return None
+    return namespaces
 
 
 def resolve_tag_groups(tag_groups: list[TagGroup], vocabulary: list[str]) -> list[TagGroup]:

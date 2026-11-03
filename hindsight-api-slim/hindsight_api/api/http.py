@@ -4002,6 +4002,14 @@ class BankTemplateConfig(BaseModel):
             "matching rule wins; unmatched scopes fall back to max_observations_per_scope."
         ),
     )
+    observation_inherited_tag_prefixes: list[str] | None = Field(
+        default=None,
+        description=(
+            'Tag prefixes observations inherit from their source memories, e.g. ["person:", "place:"]. '
+            "An observation's tags under these prefixes always equal the union of its live sources' "
+            "tags under them; its scope tags are unaffected."
+        ),
+    )
     consolidation_strategies: list[ConsolidationStrategySpec] | None = Field(
         default=None,
         description=(
