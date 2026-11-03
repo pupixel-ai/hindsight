@@ -164,7 +164,8 @@ def test_memory_units_default_expr_is_unchanged():
 class _RecordingConn:
     """Captures the SQL of the one fetchrow the pinned-model insert issues."""
 
-    def __init__(self) -> None:
+    def __init__(self, backend_type: str = "postgresql") -> None:
+        self.backend_type = backend_type
         self.sql = ""
 
     async def fetchrow(self, sql: str, *args: Any) -> dict[str, Any]:
@@ -172,7 +173,7 @@ class _RecordingConn:
         return {}
 
 
-async def _pinned_insert_sql(ext: str, monkeypatch) -> str:
+async def _pinned_insert_sql(ext: str, monkeypatch, *, backend_type: str = "postgresql") -> str:
     """The INSERT that ``_insert_pinned_mental_model`` builds for ``ext``.
 
     The method reads no attribute off ``self``, so an uninitialised instance is
@@ -183,7 +184,7 @@ async def _pinned_insert_sql(ext: str, monkeypatch) -> str:
     cfg = _cfg(ext)
     cfg.database_schema = "public"  # fq_table() reads it off the same config
     monkeypatch.setattr(me, "get_config", lambda: cfg)
-    conn = _RecordingConn()
+    conn = _RecordingConn(backend_type)
     await me.MemoryEngine._insert_pinned_mental_model(
         object.__new__(me.MemoryEngine),
         conn,
@@ -211,6 +212,20 @@ async def test_pinned_insert_casts_the_name_bind(monkeypatch):
     sql = await _pinned_insert_sql("vchord", monkeypatch)
     assert "'pinned', $3::text," in sql
     assert "tokenize(COALESCE($3, '')" in sql
+
+
+async def test_pinned_insert_ignores_only_the_postgres_primary_key_conflict(monkeypatch):
+    sql = await _pinned_insert_sql("vchord", monkeypatch)
+
+    assert "ON CONFLICT (bank_id, id) DO NOTHING" in sql
+    assert sql.index("ON CONFLICT (bank_id, id) DO NOTHING") < sql.index("RETURNING")
+
+
+async def test_pinned_insert_keeps_oracle_returning_without_conflict_rewrite(monkeypatch):
+    sql = await _pinned_insert_sql("native", monkeypatch, backend_type="oracle")
+
+    assert "ON CONFLICT" not in sql
+    assert "RETURNING id, bank_id" in sql
 
 
 async def test_pinned_insert_keeps_the_cast_without_inline_tokenization(monkeypatch):

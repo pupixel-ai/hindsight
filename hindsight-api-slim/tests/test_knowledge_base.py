@@ -12,7 +12,6 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, NoReturn
 
-import asyncpg
 import pytest
 import pytest_asyncio
 
@@ -31,6 +30,7 @@ from hindsight_api.extensions import (
     BankReadOperation,
     BankWriteContext,
     BankWriteOperation,
+    OperationValidationError,
     OperationValidatorExtension,
     ValidationResult,
 )
@@ -947,7 +947,7 @@ class TestCreate:
             bank_id, "Existing MM", "What exists?", "seed", request_context=request_context
         )
 
-        with pytest.raises(asyncpg.UniqueViolationError):
+        with pytest.raises(OperationValidationError) as excinfo:
             await memory.create_knowledge_page(
                 bank_id,
                 "New page",
@@ -956,6 +956,11 @@ class TestCreate:
                 mental_model_id=existing["id"],
                 request_context=request_context,
             )
+
+        assert excinfo.value.status_code == 409
+        assert "already exists" in excinfo.value.reason
+        nodes = await memory.list_knowledge_nodes(bank_id, request_context=request_context)
+        assert nodes == []
 
         await memory.delete_bank(bank_id, request_context=request_context)
 
